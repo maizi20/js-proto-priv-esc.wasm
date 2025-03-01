@@ -1,8 +1,48 @@
 # js-proto-priv-esc.wasm
+
 利用入口对象原型访问提权到JavaScript的WebAssembly
 
 以下代码加载并运行了一个wasm文件并传入了一个没定义属性的普通对象，但这就足够在WebAssembly中完成JavaScript提权了
+
 ```js
 WebAssembly.instantiateStreaming(fetch(wasmSource),{})
 ```
 
+## 怎么做到的
+
+首先，Object构造函数可以构造一个空的基础对象
+使用Object.getOwnPropertyNames可以获得对象的所有字符串键
+再次使用Object.getOwnPropertyNames可以得到只包含length字符串的列表
+列表强转字符串会拼接字符串，单元素字符串列表转换成字符串本身，
+因此可以使用Object.getOwnPropertyDescriptor取出列表的length属性配置值
+对配置值使用Object.getOwnPropertyNames得到由四个配置键组成的列表
+接着用Object.getOwnPropertyDescriptor和Object.defineProperty逐个取出列表中的配置值
+转移到临时对象再Object.values获取取出属性的值的列表，
+列表转数字需要先转换字符串，由于只有一个属性得到的是单元素列表，
+因此数字值能转换为原数字，逻辑值字符串转换得到NaN，借此可以区分出属性配置键列表中的value属性
+然后就可以提取出只有'value'字符串的列表了
+
+接下来就是Object.getPrototypeOf获取对象原型，
+Object.getOwnPropertyNames生成键列表并使用Object.getOwnPropertyDescriptor扫描每一个键，
+由于set&get|value&writable是配置对象的冲突属性，扫描到没有value属性的配置对象就是__proto__属性的配置对象
+得到__proto__配置属性对象后生成键列表，用Object.is比较原数值和对象构造器的返回值可以区分出基础值和对象(包括函数)
+
+接下来区分出__proto__ getter和__proto__ setter:
+valueOf是唯一存在于逻辑值原型中且不在函数原型上的键
+将__proto__ getter或setter定义空列表的valueOf属性，用数字强转触发valueOf，
+如果返回值为0，那就是触发了__proto__ getter，否则就是触发了__proto__ setter
+现在可以使用get和set的单元素字符串列表更改配置属性上的set和get键了
+
+Object的静态方法无法取出裸字符串，拿到裸字符串就可以获取原型从构造器上读取String.fromCharCode函数了
+定义setter，setter函数触发可以得到修改后的值，也许可以传入wasm函数，将参数写入全局变量就可以拿到裸字符串
+但是如何将wasm裸函数封装入对象？
+
+虽然无法把wasm裸函数直接定义到其它对象上，但是可以在裸函数上定义getter啊
+从Array.prototype获取任一symbol然后顺着原型摸到构造器拿到Symbol.toPrimitive
+直接定义wasm裸函数上的Symbol.toPrimitive getter为valueOf再把wasm裸函数强转就也能传入字符串default作为参数
+另一个方法就是，在wasm裸函数上定义set属性getter为valueOf，再直接把该函数作为配置属性定义到列表上，用assign触发getter就能传入任意值
+
+在wasm函数中摸到了裸字符串，接下来就是用Object封装然后获取原型(在低版本从基元值获取原型可能报错)
+通过定义wasm裸函数setter获取String.fromCharCode裸函数
+
+其实用Object.groupBy就会轻松很多了
